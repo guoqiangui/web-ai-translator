@@ -79,18 +79,20 @@ This extension translates web page text through an LLM. The flow involves three 
 
 1. **Content script** walks the DOM via `TreeWalker`, marks translatable elements with `data-wt-id` attributes, extracts a cleaned HTML copy, and splits it into chunks (max ~5K chars each — small chunks so multiple LLM requests stream in parallel).
 2. **Content script** sends chunks to the **background** via `webext-bridge` (`translate-page` message).
-3. **Background** translates chunks concurrently (up to 6 in flight via a `pLimit` pool), calling the OpenAI-compatible API for each chunk via `src/logic/translator.ts`. It streams each completed element back to the content script (`translation-chunk-result`) and reports any elements it couldn't translate (`translation-elements-failed`).
-4. **Content script** receives translated HTML per chunk and uses `data-wt-id` to map it back to the real DOM elements (`replaceFromTranslatedHtml`).
+3. **Background** translates chunks concurrently (up to 6 in flight via a `pLimit` pool), calling the OpenAI-compatible API for each chunk via `src/logic/translator.ts`. Each chunk's URLs are masked to placeholders first (`url-mask.ts`). It streams each completed element back to the content script (`translation-chunk-result`, URLs restored) and reports any elements it couldn't translate (`translation-elements-failed`).
+4. **Content script** maps each translated element back to the real DOM by `data-wt-id` (`replaceFromTranslatedHtml`). Scrolling fires more batches that translate concurrently with in-flight ones; the content script owns completion locally (`completed >= total`) rather than trusting any single batch's `done`.
 5. Users can click translated elements to toggle between original and translated text. `restoreAllOriginals()` reverts everything.
 
 ### Key modules in `src/logic/`
 
 | Module | Role |
 |--------|------|
-| `html-extractor.ts` | DOM walker: marks elements with `data-wt-id`, extracts clean HTML, splits into chunks. Skips SCRIPT/STYLE/SVG/IFRAME/canvas/video/audio/template and contenteditable elements. |
+| `html-extractor.ts` | DOM walker: marks elements with `data-wt-id` (returning the id list per call), extracts clean HTML for a given id set, splits into chunks. Skips SCRIPT/STYLE/SVG/IFRAME/canvas/video/audio/template and contenteditable elements. |
 | `translator.ts` | Calls OpenAI-compatible API with the HTML translation prompt. Uses `openai` SDK. |
-| `prompt-builder.ts` | Builds the system prompt instructing the LLM to preserve HTML structure and `data-wt-id` attributes. Strips markdown fences from responses. |
-| `dom-replacer.ts` | Maps translated HTML back to original DOM elements by `data-wt-id`. Injects CSS styles for the translated/original toggle UI. Stores original HTML per element. |
+| `element-extractor.ts` | Incrementally scans the streaming response for complete `data-wt-id` elements, emitting each one as soon as its closing tag arrives. Tracks a resume offset so cost is proportional to newly-arrived text. |
+| `url-mask.ts` | Replaces long `href`/`src` URLs with short `__WTURL<n>__` placeholders before translation and restores them after, so the LLM doesn't spend output tokens re-emitting URLs. Per-chunk maps keep it concurrency-safe. |
+| `prompt-builder.ts` | Builds the system prompt instructing the LLM to preserve HTML structure, `data-wt-id` attributes, and `__WTURL<n>__` placeholders. Strips markdown fences from responses. |
+| `dom-replacer.ts` | Maps translated HTML back to original DOM elements by `data-wt-id` (single `querySelectorAll`, O(n)). Injects CSS styles for the translated/original toggle UI. Stores original HTML per element. |
 | `storage.ts` | Reactive wrappers (`useWebExtensionStorage`) for persisting `llm-config` and `translation-settings` in `browser.storage.local`. |
 | `types.ts` | `HtmlChunk`, `LLMConfig`, `TranslationSettings`, `TranslationStatus` (`'idle' | 'extracting' | 'translating' | 'done' | 'error'`), `TranslationState`. |
 

@@ -12,9 +12,16 @@ export interface CompletedElement {
  */
 export class ElementExtractor {
   private extractedIds = new Set<string>()
+  /**
+   * Offset to resume scanning from. Everything before it is already-completed
+   * elements that won't change, so we never re-scan them. Held back to the
+   * earliest still-incomplete element so its closing tag is caught when it lands.
+   */
+  private scanStart = 0
 
   reset(): void {
     this.extractedIds.clear()
+    this.scanStart = 0
   }
 
   hasExtracted(id: string): boolean {
@@ -23,27 +30,41 @@ export class ElementExtractor {
 
   /**
    * Scan accumulated streaming text for newly-complete elements.
-   * Each element is returned at most once across calls.
+   * Each element is returned at most once across calls. Scanning resumes from
+   * `scanStart`, so cost is proportional to newly-arrived text, not total length.
    */
   extractCompleteElements(accumulatedText: string): CompletedElement[] {
     const results: CompletedElement[] = []
     const markerRegex = /data-wt-id="(wt-\d+)"/g
+    markerRegex.lastIndex = this.scanStart
+
+    let firstIncomplete = -1
+    let lastMarkerPos = this.scanStart
     let match = markerRegex.exec(accumulatedText)
     while (match !== null) {
+      lastMarkerPos = match.index
       const id = match[1]
       if (this.extractedIds.has(id)) {
         match = markerRegex.exec(accumulatedText)
         continue
       }
 
-      const markerPos = match.index
-      const el = tryExtractElement(accumulatedText, markerPos, id)
+      const el = tryExtractElement(accumulatedText, match.index, id)
       if (el) {
         results.push(el)
         this.extractedIds.add(id)
       }
+      else if (firstIncomplete === -1) {
+        firstIncomplete = match.index
+      }
       match = markerRegex.exec(accumulatedText)
     }
+
+    // Resume next time from the earliest unfinished element, or — if everything
+    // completed — from the last marker seen (a re-scan there is O(1) since it's
+    // already in extractedIds, and it guards against a marker split across the
+    // streaming boundary).
+    this.scanStart = firstIncomplete !== -1 ? firstIncomplete : lastMarkerPos
 
     return results
   }
@@ -53,8 +74,9 @@ export class ElementExtractor {
    * extract any remaining elements (should all be complete by now).
    */
   extractAllRemaining(cleanedText: string): CompletedElement[] {
-    // Re-scan the fully-cleaned text — all elements should close now.
-    // Use a fresh regex on the cleaned text.
+    // Fence-stripping shifts offsets, so positions no longer match the
+    // streamed text — reset and scan the cleaned text from the start.
+    this.scanStart = 0
     return this.extractCompleteElements(cleanedText)
   }
 }

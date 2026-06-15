@@ -142,12 +142,12 @@ function walkAndMark(respectExisting: boolean): string[] {
   return ids
 }
 
-export function markTranslatableElements(): number {
-  return walkAndMark(false).length
+export function markTranslatableElements(): string[] {
+  return walkAndMark(false)
 }
 
-export function markNewVisibleElements(): number {
-  return walkAndMark(true).length
+export function markNewVisibleElements(): string[] {
+  return walkAndMark(true)
 }
 
 function hasDirectText(el: Element): boolean {
@@ -158,12 +158,17 @@ function hasDirectText(el: Element): boolean {
   return el.children.length === 0 && !!el.textContent?.trim()
 }
 
-/** Extract clean HTML for in-flight elements only. */
-export function extractCleanHtml(): string {
+/**
+ * Extract clean HTML for the given element ids (in `elementMap` order).
+ * Pass the id list returned by a mark* call so each scroll batch extracts only
+ * its own elements — letting batches translate concurrently instead of serially.
+ */
+export function extractCleanHtml(ids: string[]): string {
+  const wanted = new Set(ids)
   const container = document.createElement('div')
 
   for (const [id, el] of elementMap) {
-    if (!inFlightIds.has(id))
+    if (!wanted.has(id))
       continue
     const clone = el.cloneNode(true) as Element
     cleanAttributes(clone)

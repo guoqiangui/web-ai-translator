@@ -37,41 +37,35 @@ void ((() => {
   // ── scroll-driven incremental translation ──
 
   let scrollDebounceTimer: ReturnType<typeof setTimeout> | null = null
-  /** Number of elements currently being translated by the background (has been sent, not yet replaced in DOM). */
-  let inFlightElementCount = 0
-  let pendingScroll = false
 
-  function sendCurrentBatch() {
-    if (inFlightElementCount > 0) {
-      // A batch is still in flight — defer until it finishes.
-      pendingScroll = true
-      return
-    }
-    pendingScroll = false
-
-    const count = markNewVisibleElements()
-    if (count === 0)
+  /**
+   * Dispatch a set of freshly-marked element ids to the background. Batches run
+   * concurrently — `walkAndMark` never re-marks an element that already has a
+   * `data-wt-id`, so overlapping batches can't double-send.
+   */
+  function dispatchBatch(ids: string[]) {
+    if (ids.length === 0)
       return
 
-    const cleanHtml = extractCleanHtml()
+    const cleanHtml = extractCleanHtml(ids)
     if (!cleanHtml)
       return
 
     const chunks = splitIntoChunks(cleanHtml)
-    inFlightElementCount = count
-    progressTotal.value += count
-    if (progressStatus.value === 'done' || progressStatus.value === 'idle')
+    progressTotal.value += ids.length
+    if (progressStatus.value !== 'translating')
       progressStatus.value = 'translating'
 
     sendMessage('translate-page', { chunks }, 'background').then((result) => {
       if (!result.success) {
         progressError.value = result.error || 'Translation failed'
         progressStatus.value = 'error'
-        inFlightElementCount = 0
       }
-      // inFlightElementCount is decremented per-element in translation-chunk-result;
-      // when it hits 0 we process the deferred scroll batch below.
     })
+  }
+
+  function sendCurrentBatch() {
+    dispatchBatch(markNewVisibleElements())
   }
 
   function onScroll() {
@@ -83,13 +77,13 @@ void ((() => {
   }
 
   /**
-   * Mark `n` in-flight elements as settled (translated or failed). Clamped at
-   * zero so a double-count can never wedge the `=== 0` batch-completion check.
+   * Completion is owned by the content script via counts, not by the
+   * background's per-call `done` — with concurrent batches an early small batch
+   * would otherwise flip the whole page to "done" prematurely.
    */
-  function settleElements(n: number) {
-    inFlightElementCount = Math.max(0, inFlightElementCount - n)
-    if (inFlightElementCount === 0 && pendingScroll)
-      sendCurrentBatch()
+  function maybeMarkDone() {
+    if (progressStatus.value === 'translating' && progressCompleted.value >= progressTotal.value)
+      progressStatus.value = 'done'
   }
 
   // ── message handlers ──
@@ -112,8 +106,6 @@ void ((() => {
       progressTotal.value = 0
       progressCompleted.value = 0
       progressError.value = ''
-      inFlightElementCount = 0
-      pendingScroll = false
       window.removeEventListener('scroll', onScroll, { passive: true } as any)
       return
     }
@@ -125,30 +117,15 @@ void ((() => {
     progressError.value = ''
     progressTotal.value = 0
     progressCompleted.value = 0
-    inFlightElementCount = 0
-    pendingScroll = false
 
-    const count = markTranslatableElements()
-    if (count === 0) {
+    const ids = markTranslatableElements()
+    if (ids.length === 0) {
       progressStatus.value = 'idle'
       return
     }
 
-    const cleanHtml = extractCleanHtml()
-    const chunks = splitIntoChunks(cleanHtml)
-
-    inFlightElementCount = count
-    progressTotal.value = count
-    progressCompleted.value = 0
     progressStatus.value = 'translating'
-
-    sendMessage('translate-page', { chunks }, 'background').then((result) => {
-      if (!result.success) {
-        progressStatus.value = 'error'
-        progressError.value = result.error || 'Translation failed'
-        inFlightElementCount = 0
-      }
-    })
+    dispatchBatch(ids)
 
     // Watch for newly scrolled-into-view elements
     window.addEventListener('scroll', onScroll, { passive: true } as any)
@@ -157,21 +134,26 @@ void ((() => {
   onMessage('translation-chunk-result', ({ data }) => {
     replaceFromTranslatedHtml(data.html)
     progressCompleted.value++
-    settleElements(1)
+    maybeMarkDone()
   })
 
   // Elements the background couldn't translate (chunk failed / LLM dropped them).
-  // Settle them so in-flight tracking can reach zero — otherwise scroll
-  // translation deadlocks waiting on results that will never come.
+  // Count them as settled so the page can still reach "done" — otherwise the
+  // progress bar hangs below 100% forever.
   onMessage('translation-elements-failed', ({ data }) => {
     markIdsCompleted(data.ids)
     progressCompleted.value += data.ids.length
-    settleElements(data.ids.length)
+    maybeMarkDone()
   })
 
+  // Background sends coarse status; trust it only for `error`. Completion is
+  // computed locally from counts (see maybeMarkDone) since concurrent batches
+  // each emit their own `done`.
   onMessage('translation-progress', ({ data }) => {
-    progressStatus.value = data.status
-    if (data.error)
-      progressError.value = data.error
+    if (data.status === 'error') {
+      progressStatus.value = 'error'
+      if (data.error)
+        progressError.value = data.error
+    }
   })
 })())

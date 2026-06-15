@@ -2,6 +2,7 @@ import { onMessage, sendMessage } from 'webext-bridge/background'
 import type OpenAI from 'openai'
 import { createTranslationClient, translateHtmlStreamingWithCallback } from '~/logic/translator'
 import { extractTranslatedHtml } from '~/logic/prompt-builder'
+import { maskUrls, unmaskUrls } from '~/logic/url-mask'
 import { ElementExtractor } from '~/logic/element-extractor'
 import type { CompletedElement } from '~/logic/element-extractor'
 import type { LLMConfig, TranslationSettings } from '~/logic/types'
@@ -145,18 +146,21 @@ onMessage('translate-page', async ({ data, sender }) => {
         // so retries never resend elements that already reached the page.
         const extractor = new ElementExtractor()
 
+        // Mask URLs so the LLM doesn't waste output tokens re-emitting them.
+        const { masked, restore } = maskUrls(chunk.html)
+
         try {
           await translateWithRetryElementwise(
             client,
             config.model,
-            chunk.html,
+            masked,
             settings.targetLanguage,
             signal,
             extractor,
             (element: CompletedElement) => {
               safeSendMessage('translation-chunk-result', {
                 chunkId: chunk.id,
-                html: element.html,
+                html: unmaskUrls(element.html, restore),
               }, { context: 'content-script', tabId })
             },
           )
