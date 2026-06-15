@@ -77,9 +77,9 @@ This extension translates web page text through an LLM. The flow involves three 
 
 ### How translation works
 
-1. **Content script** walks the DOM via `TreeWalker`, marks translatable elements with `data-wt-id` attributes, extracts a cleaned HTML copy, and splits it into chunks (max ~15K chars each).
+1. **Content script** walks the DOM via `TreeWalker`, marks translatable elements with `data-wt-id` attributes, extracts a cleaned HTML copy, and splits it into chunks (max ~5K chars each — small chunks so multiple LLM requests stream in parallel).
 2. **Content script** sends chunks to the **background** via `webext-bridge` (`translate-page` message).
-3. **Background** iterates chunks, calling the OpenAI-compatible API for each chunk via `src/logic/translator.ts`. It streams progress back to the content script (`translation-progress` / `translation-chunk-result`).
+3. **Background** translates chunks concurrently (up to 6 in flight via a `pLimit` pool), calling the OpenAI-compatible API for each chunk via `src/logic/translator.ts`. It streams each completed element back to the content script (`translation-chunk-result`) and reports any elements it couldn't translate (`translation-elements-failed`).
 4. **Content script** receives translated HTML per chunk and uses `data-wt-id` to map it back to the real DOM elements (`replaceFromTranslatedHtml`).
 5. Users can click translated elements to toggle between original and translated text. `restoreAllOriginals()` reverts everything.
 
@@ -96,7 +96,7 @@ This extension translates web page text through an LLM. The flow involves three 
 
 ### Retry & error handling
 
-The background service worker retries failed LLM calls up to 2 times. On HTTP 429 it reads the `Retry-After` header. On 401/403 it throws immediately with a descriptive error. Per-tab `AbortController` instances allow cancelling in-flight translation if the user starts a new one.
+The background service worker retries failed LLM calls up to 2 times. On HTTP 429 it reads the `Retry-After` header. On 401/403 it throws immediately with a descriptive error. Each chunk owns one `ElementExtractor` that lives across retries, so a retry never re-sends elements that already reached the page. Any elements still missing after a chunk exhausts its retries (or that the LLM dropped) are reported via `translation-elements-failed` so the content script can settle its in-flight count instead of deadlocking. Per-tab `AbortController` instances allow cancelling in-flight translation if the user starts a new one.
 
 ## Message Protocol
 
@@ -105,9 +105,11 @@ All cross-context messages are typed via `shim.d.ts` declaring `webext-bridge`'s
 | Message | Direction | Purpose |
 |---------|-----------|---------|
 | `translate-page` | content-script → background | Send HTML chunks for translation |
-| `translation-chunk-result` | background → content-script | Return a single translated chunk |
-| `translation-progress` | background → content-script | Status updates during translation |
+| `translation-chunk-result` | background → content-script | Return a single translated element (streamed as soon as it completes) |
+| `translation-elements-failed` | background → content-script | Report `data-wt-id`s that couldn't be translated, so the content script settles its in-flight count |
+| `translation-progress` | background → content-script | Coarse status updates (`translating` / `done` / `error`) |
 | `trigger-translation` | popup → content-script | User-initiated translate/restore command |
+| `cancel-translation` | content-script → background | Abort in-flight translation for this tab |
 | `get-translation-status` | popup → content-script | Query current progress when popup opens |
 
 The keyboard shortcut **Alt+T** (`browser.commands`) also triggers `trigger-translation` via the background.

@@ -56,7 +56,9 @@ const KEEP_ATTRIBUTES = new Set([
   'title',
 ])
 
-const MAX_CHARS_PER_CHUNK = 80000
+// Small chunks let multiple LLM requests stream in parallel — LLM output is
+// serial per request, so wall-clock time scales with chunk size, not count.
+const MAX_CHARS_PER_CHUNK = 5000
 
 let idCounter = 0
 const elementMap = new Map<string, Element>()

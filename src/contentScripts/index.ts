@@ -2,7 +2,7 @@ import { onMessage, sendMessage } from 'webext-bridge/content-script'
 import { createApp, ref } from 'vue'
 import ProgressFloat from './views/ProgressFloat.vue'
 import { setupApp } from '~/logic/common-setup'
-import { extractCleanHtml, markNewVisibleElements, markTranslatableElements, resetTranslationState, splitIntoChunks } from '~/logic/html-extractor'
+import { extractCleanHtml, markIdsCompleted, markNewVisibleElements, markTranslatableElements, resetTranslationState, splitIntoChunks } from '~/logic/html-extractor'
 import { injectStyles, replaceFromTranslatedHtml, restoreAllOriginals } from '~/logic/dom-replacer'
 import type { TranslationStatus } from '~/logic/types'
 
@@ -82,6 +82,16 @@ void ((() => {
     scrollDebounceTimer = setTimeout(sendCurrentBatch, 600)
   }
 
+  /**
+   * Mark `n` in-flight elements as settled (translated or failed). Clamped at
+   * zero so a double-count can never wedge the `=== 0` batch-completion check.
+   */
+  function settleElements(n: number) {
+    inFlightElementCount = Math.max(0, inFlightElementCount - n)
+    if (inFlightElementCount === 0 && pendingScroll)
+      sendCurrentBatch()
+  }
+
   // ── message handlers ──
 
   onMessage('get-translation-status', () => {
@@ -147,11 +157,16 @@ void ((() => {
   onMessage('translation-chunk-result', ({ data }) => {
     replaceFromTranslatedHtml(data.html)
     progressCompleted.value++
-    inFlightElementCount--
+    settleElements(1)
+  })
 
-    // Last element of this batch arrived — process deferred scroll batch if any.
-    if (inFlightElementCount === 0 && pendingScroll)
-      sendCurrentBatch()
+  // Elements the background couldn't translate (chunk failed / LLM dropped them).
+  // Settle them so in-flight tracking can reach zero — otherwise scroll
+  // translation deadlocks waiting on results that will never come.
+  onMessage('translation-elements-failed', ({ data }) => {
+    markIdsCompleted(data.ids)
+    progressCompleted.value += data.ids.length
+    settleElements(data.ids.length)
   })
 
   onMessage('translation-progress', ({ data }) => {

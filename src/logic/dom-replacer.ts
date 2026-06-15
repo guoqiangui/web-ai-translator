@@ -43,9 +43,10 @@ export function replaceFromTranslatedHtml(translatedHtml: string): void {
   const doc = parser.parseFromString(`<body>${translatedHtml}</body>`, 'text/html')
   const replacedIds: string[] = []
 
-  for (const [id, realEl] of elementMap) {
-    const translatedEl = doc.querySelector(`[data-wt-id="${id}"]`)
-    if (!translatedEl)
+  for (const translatedEl of Array.from(doc.querySelectorAll('[data-wt-id]'))) {
+    const id = translatedEl.getAttribute('data-wt-id')!
+    const realEl = elementMap.get(id)
+    if (!realEl)
       continue
 
     if (translatedEl.innerHTML === realEl.innerHTML) {

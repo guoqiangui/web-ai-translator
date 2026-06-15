@@ -8,11 +8,9 @@ declare module 'webext-bridge' {
       { success: boolean, error?: string }
     >
     'translation-chunk-result': { chunkId: number, html: string }
+    'translation-elements-failed': { ids: string[] }
     'translation-progress': {
       status: TranslationStatus
-      totalChunks: number
-      completedChunks: number
-      failedChunks?: number
       error?: string
     }
     'trigger-translation': { action: 'start' | 'restore' }

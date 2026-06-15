@@ -90,6 +90,10 @@ function pLimit(concurrency: number) {
   }
 }
 
+function extractWtIds(html: string): string[] {
+  return Array.from(html.matchAll(/data-wt-id="(wt-\d+)"/g), m => m[1])
+}
+
 onMessage('translate-page', async ({ data, sender }) => {
   const tabId = sender.tabId
   if (!tabId)
@@ -124,27 +128,22 @@ onMessage('translate-page', async ({ data, sender }) => {
   try {
     // Reuse one client instance for all chunks in this batch
     const client = createTranslationClient(config)
-    const limit = pLimit(3)
+    const limit = pLimit(6)
 
-    // Count total elements across all chunks
-    let totalElements = 0
-    for (const chunk of chunks) {
-      totalElements += (chunk.html.match(/data-wt-id="/g) || []).length
-    }
-
-    let completedElements = 0
     let shouldStop = false
 
     safeSendMessage('translation-progress', {
       status: 'translating',
-      totalElements,
-      completedElements: 0,
     }, { context: 'content-script', tabId })
 
     const tasks = chunks.map(chunk =>
       limit(async () => {
         if (signal.aborted || shouldStop)
           return
+
+        // The extractor lives outside the retry loop (inside translateWithRetryElementwise)
+        // so retries never resend elements that already reached the page.
+        const extractor = new ElementExtractor()
 
         try {
           await translateWithRetryElementwise(
@@ -153,16 +152,11 @@ onMessage('translate-page', async ({ data, sender }) => {
             chunk.html,
             settings.targetLanguage,
             signal,
+            extractor,
             (element: CompletedElement) => {
               safeSendMessage('translation-chunk-result', {
                 chunkId: chunk.id,
                 html: element.html,
-              }, { context: 'content-script', tabId })
-              completedElements++
-              safeSendMessage('translation-progress', {
-                status: 'translating',
-                totalElements,
-                completedElements,
               }, { context: 'content-script', tabId })
             },
           )
@@ -174,6 +168,16 @@ onMessage('translate-page', async ({ data, sender }) => {
           }
           console.warn(`[wt] chunk ${chunk.id} failed:`, err.message)
         }
+
+        // Elements that never arrived (chunk failed, or the LLM dropped/renamed
+        // them) must still be reported, or the content script's in-flight
+        // tracking deadlocks and scroll-translation stops forever.
+        const failedIds = extractWtIds(chunk.html).filter(id => !extractor.hasExtracted(id))
+        if (failedIds.length > 0) {
+          safeSendMessage('translation-elements-failed', {
+            ids: failedIds,
+          }, { context: 'content-script', tabId })
+        }
       }),
     )
 
@@ -182,8 +186,6 @@ onMessage('translate-page', async ({ data, sender }) => {
     if (!signal.aborted && !shouldStop) {
       safeSendMessage('translation-progress', {
         status: 'done',
-        totalElements,
-        completedElements,
       }, { context: 'content-script', tabId })
     }
 
@@ -196,8 +198,6 @@ onMessage('translate-page', async ({ data, sender }) => {
     const errorMsg = err?.message || 'Translation failed'
     safeSendMessage('translation-progress', {
       status: 'error',
-      totalElements: 0,
-      completedElements: 0,
       error: errorMsg,
     }, { context: 'content-script', tabId })
 
@@ -222,11 +222,11 @@ async function translateWithRetryElementwise(
   html: string,
   targetLanguage: string,
   signal: AbortSignal,
+  extractor: ElementExtractor,
   onElement: (element: CompletedElement) => void,
   retries = 2,
 ): Promise<void> {
   for (let attempt = 0; attempt <= retries; attempt++) {
-    const extractor = new ElementExtractor()
     try {
       const accumulated = await translateHtmlStreamingWithCallback(
         client,

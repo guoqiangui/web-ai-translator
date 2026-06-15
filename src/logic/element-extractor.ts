@@ -17,6 +17,10 @@ export class ElementExtractor {
     this.extractedIds.clear()
   }
 
+  hasExtracted(id: string): boolean {
+    return this.extractedIds.has(id)
+  }
+
   /**
    * Scan accumulated streaming text for newly-complete elements.
    * Each element is returned at most once across calls.
@@ -135,7 +139,7 @@ function readTagName(text: string, start: number): string {
 function findValidOpenTag(
   text: string,
   openStr: string,
-  tagName: string,
+  _tagName: string,
   startPos: number,
 ): number {
   let pos = text.indexOf(openStr, startPos)
