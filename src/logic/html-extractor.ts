@@ -85,6 +85,12 @@ function isInViewport(el: Element): boolean {
 }
 
 export function resetTranslationState(): void {
+  // Strip data-wt-id from the DOM so the next walk's ancestor check
+  // (`parentElement.closest('[data-wt-id]')`) only ever sees ids from the
+  // current run. restoreAllOriginals leaves these attributes behind, so without
+  // this a stale ancestor id could wrongly skip a descendant on re-translation.
+  for (const el of elementMap.values())
+    el.removeAttribute('data-wt-id')
   elementMap.clear()
   inFlightIds.clear()
   idCounter = 0
@@ -124,6 +130,18 @@ function walkAndMark(respectExisting: boolean): string[] {
     }
 
     if (TRANSLATABLE_TAGS.has(el.tagName) && hasDirectText(el)) {
+      // Skip elements nested inside an already-marked ancestor — they'll be
+      // translated as part of that ancestor's HTML. Marking a nested inline child
+      // (e.g. <em> inside <p>) separately corrupts the parent's saved "original":
+      // the streamed child can be swapped to its translation before the parent
+      // captures its original innerHTML, so later expanding the parent's original
+      // would show translated text. `parentElement` scopes the check to ancestors
+      // (never self); resetTranslationState strips stale ids so any match here is
+      // a genuine ancestor marked earlier in this same walk (pre-order).
+      if (el.parentElement?.closest('[data-wt-id]')) {
+        node = walker.nextNode()
+        continue
+      }
       const text = el.textContent?.trim()
       if (text && text.length >= 2) {
         const style = getComputedStyle(el)
