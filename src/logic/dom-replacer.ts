@@ -57,6 +57,14 @@ export function replaceFromTranslatedHtml(translatedHtml: string): void {
     if (!originalHtmlMap.has(id))
       originalHtmlMap.set(id, realEl.innerHTML)
 
+    // The HTML sent to the LLM had non-essential attributes (class, id, style,
+    // …) stripped to save tokens (see cleanAttributes in html-extractor), so the
+    // translated descendants come back missing them. Copy each original
+    // descendant's attributes onto its translated counterpart before the swap so
+    // styling / anchor / a11y classes survive. realEl's own attributes are kept
+    // automatically since we only overwrite its innerHTML.
+    backfillStrippedAttributes(realEl, translatedEl)
+
     realEl.innerHTML = translatedEl.innerHTML
     realEl.setAttribute('data-wt-translated', 'true')
     realEl.classList.add('wt-translated-block')
@@ -69,6 +77,39 @@ export function replaceFromTranslatedHtml(translatedHtml: string): void {
   // Clear from in-flight set so scrolling won't resend these to the LLM
   if (replacedIds.length > 0)
     markIdsCompleted(replacedIds)
+}
+
+/**
+ * Restore attributes that html-extractor's cleanAttributes stripped before
+ * sending HTML to the LLM (class, id, style, aria-*, …). Walks the original and
+ * translated descendant trees in parallel and, for each matching element, copies
+ * over any attribute the translation is missing. Attributes the translation
+ * already carries (e.g. href restored from a URL mask) are left untouched.
+ *
+ * The LLM is instructed to preserve structure, but it can still drop or add a
+ * tag. If the two trees diverge (different length or tag name at any position),
+ * we stop walking that branch rather than mismap attributes — a missing class is
+ * a far smaller defect than attributes landing on the wrong element.
+ */
+function backfillStrippedAttributes(originalEl: Element, translatedEl: Element): void {
+  const originalChildren = originalEl.children
+  const translatedChildren = translatedEl.children
+  if (originalChildren.length !== translatedChildren.length)
+    return
+
+  for (let i = 0; i < originalChildren.length; i++) {
+    const origChild = originalChildren[i]
+    const transChild = translatedChildren[i]
+    if (origChild.tagName !== transChild.tagName)
+      continue
+
+    for (const attr of Array.from(origChild.attributes)) {
+      if (!transChild.hasAttribute(attr.name))
+        transChild.setAttribute(attr.name, attr.value)
+    }
+
+    backfillStrippedAttributes(origChild, transChild)
+  }
 }
 
 function handleToggleClick(event: Event): void {
